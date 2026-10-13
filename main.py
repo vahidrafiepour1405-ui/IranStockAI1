@@ -20,6 +20,7 @@ VERSION = "1.0.0"
 FRESH_SECONDS = max(15, int(os.getenv("MAX_DATA_AGE_SECONDS", "180")))
 CACHE_SECONDS = max(5, int(os.getenv("MARKET_CACHE_SECONDS", "20")))
 TIMEOUT_SECONDS = max(2, min(15, float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "8"))))
+BRS_API_KEY = os.getenv("BRS_API_KEY", "").strip()
 MARKETWATCH_QUERY = "?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0"
 MARKETWATCH_URLS = [
     os.getenv("TSETMC_MARKETWATCH_URL", "https://webgw.tse.ir/InstrumentProvider/api/v1/MarketWatch/MarketWatchCash/fa"),
@@ -390,6 +391,17 @@ async def codal_reports(symbol: str, limit: int = Query(default=20, ge=1, le=100
             errors.append("TSETMC_CODAL_PROXY_EMPTY")
         except Exception as exc:
             errors.append(public_error(exc))
+        # Optional provider fallback; the API key stays on the server.
+        if BRS_API_KEY:
+            try:
+                brs_url = "https://api.brsapi.ir/Codal/Announcement.php?" + urlencode({"key": BRS_API_KEY, "l18": symbol, "page": 1})
+                payload = await request_json(client, brs_url)
+                if payload:
+                    return {"status": "LIVE", "source": "api.brsapi.ir/Codal/Announcement.php",
+                            "symbol": symbol, "received_at": utc_now(), "data": payload, "warning": None}
+                errors.append("BRS_CODAL_EMPTY_RESPONSE")
+            except Exception as exc:
+                errors.append("BRS_CODAL_" + public_error(exc))
     return JSONResponse(status_code=503, content={"status": "OFFLINE", "symbol": symbol, "data": [],
                         "error": ";".join(dict.fromkeys(errors)), "message": "اطلاعیه‌های واقعی کدال از سرور دریافت نشد؛ داده ساختگی نمایش داده نمی‌شود."})
 
@@ -402,11 +414,35 @@ async def analysis_data(symbol: str, history_limit: int = Query(default=250, ge=
         try:
             inscode, instrument = await resolve_instrument(client, symbol)
         except Exception as exc:
-            return JSONResponse(status_code=503, content={"status": "OFFLINE", "symbol": symbol,
-                                "error": public_error(exc), "message": "نماد از منبع واقعی بازار شناسایی نشد."})
+            inscode, instrument = None, None
+            tsetmc_error = public_error(exc)
+        else:
+            tsetmc_error = None
+        if not inscode and BRS_API_KEY:
+            # BrsApi returns real daily history and حقیقی/حقوقی history by symbol.
+            brs_results = {}
+            for part, mode in (("history", "0"), ("investor_flow", "1")):
+                try:
+                    brs_url = "https://api.brsapi.ir/Tsetmc/History.php?" + urlencode({"key": BRS_API_KEY, "type": mode, "l18": symbol})
+                    brs_payload = await request_json(client, brs_url)
+                    brs_results[part] = {"ok": bool(brs_payload), "data": brs_payload if brs_payload else None,
+                                         "error": None if brs_payload else "BRS_EMPTY_RESPONSE"}
+                except Exception as exc:
+                    brs_results[part] = {"ok": False, "data": None, "error": public_error(exc)}
+            good = sum(1 for x in brs_results.values() if x["ok"])
+            if good:
+                return {"status": "LIVE" if good == 2 else "PARTIAL", "symbol": symbol,
+                        "source": "api.brsapi.ir/Tsetmc/History.php", "received_at": utc_now(),
+                        "history_limit": history_limit, "data": brs_results,
+                        "available_components": [k for k,v in brs_results.items() if v["ok"]],
+                        "unavailable_components": {k:v["error"] for k,v in brs_results.items() if not v["ok"]},
+                        "note": "Real provider data; history may be daily rather than intraday. No trade signal is inferred automatically."}
+            tsetmc_error = "TSETMC_" + str(tsetmc_error or "INSTRUMENT_NOT_FOUND") + ";BRS_API_UNAVAILABLE"
         if not inscode:
-            return JSONResponse(status_code=404, content={"status": "INSUFFICIENT DATA", "symbol": symbol,
-                                "message": "کد یکتای نماد از منبع بازار دریافت نشد."})
+            return JSONResponse(status_code=503, content={"status": "OFFLINE", "symbol": symbol,
+                                "error": tsetmc_error or "INSTRUMENT_NOT_FOUND",
+                                "brs_api_key_configured": bool(BRS_API_KEY),
+                                "message": "نماد از منابع واقعی دریافت نشد؛ برای تاریخچه جایگزین، کلید API مجاز لازم است."})
         urls = {
             "history": f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceDailyList/{quote(inscode, safe='')}/{history_limit}",
             "investor_flow": f"https://cdn.tsetmc.com/api/ClientType/GetClientTypeHistory/{quote(inscode, safe='')}",
@@ -437,6 +473,9 @@ async def data_sources():
         {"name": "TSETMC MarketWatch", "kind": "market prices", "endpoint": "/api/market", "status": "verified only by live diagnostics"},
         {"name": "TSETMC historical prices, investor flow, order book, instrument info", "kind": "analysis inputs", "endpoint": "/api/analysis/{symbol}", "status": "tested on request; may be geo-blocked"},
         {"name": "Codal public disclosures", "kind": "company filings", "endpoint": "/api/codal/{symbol}", "status": "tested on request; may be geo-blocked"},
+        {"name": "BrsApi history and Codal", "kind": "history, حقیقی/حقوقی, disclosures",
+         "status": "configured" if BRS_API_KEY else "needs BRS_API_KEY in Render environment",
+         "credential_required": True, "credential_name": "BRS_API_KEY"},
         {"name": "Mofid brokerage", "kind": "broker account", "status": "not connected; no official API credentials supplied"},
     ], "policy": "No fabricated data; unavailable sources return OFFLINE or INSUFFICIENT DATA."}
 
