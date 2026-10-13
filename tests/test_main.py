@@ -60,8 +60,7 @@ def test_fundamentals_and_history_fail_closed():
     assert fundamentals.status_code == 200 and fundamentals.json()["status"] == "INSUFFICIENT DATA"
 
 
-@pytest.mark.asyncio
-async def test_market_offline_does_not_invent_rows(monkeypatch):
+def test_market_offline_does_not_invent_rows(monkeypatch):
     async def fake_get():
         return None, None, "UPSTREAM_UNAVAILABLE", "OFFLINE"
     monkeypatch.setattr(main, "get_market_data", fake_get)
@@ -71,8 +70,7 @@ async def test_market_offline_does_not_invent_rows(monkeypatch):
     assert response.json()["items"] == []
 
 
-@pytest.mark.asyncio
-async def test_signal_is_insufficient_without_data(monkeypatch):
+def test_signal_is_insufficient_without_data(monkeypatch):
     async def fake_get():
         return None, None, "UPSTREAM_UNAVAILABLE", "OFFLINE"
     monkeypatch.setattr(main, "get_market_data", fake_get)
