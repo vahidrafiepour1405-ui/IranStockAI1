@@ -79,7 +79,7 @@ def norm_num(value):
 
 
 def find_rows(obj):
-    keys_of_interest = {"symbol", "lval18afc", "inscode", "instrumentid", "isin", "instrumentname", "instrument_name", "companynamepersian"}
+    keys_of_interest = {"symbol", "l18", "id", "lval18afc", "inscode", "instrumentid", "isin", "instrumentname", "instrument_name", "companynamepersian"}
     if isinstance(obj, list):
         if obj and any(isinstance(x, dict) and keys_of_interest.intersection(str(k).lower() for k in x) for x in obj[:10]):
             return obj
@@ -102,7 +102,7 @@ def find_rows(obj):
 
 
 def normalize(row: dict):
-    symbol = scalar(pick(row, "symbol", "lval18aFC", "lval18a", "ticker", "shortName", "instrumentName", "instrument_Name", "instrumentname"))
+    symbol = scalar(pick(row, "symbol", "l18", "lval18aFC", "lval18a", "ticker", "shortName", "instrumentName", "instrument_Name", "instrumentname"))
     if not isinstance(symbol, (str, int)) or not str(symbol).strip():
         return None
     symbol = str(symbol).strip()
@@ -121,7 +121,7 @@ def normalize(row: dict):
     name = scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default=""))
     return {
         "symbol": symbol, "name": str(name or "").strip(),
-        "inscode": str(pick(row, "insCode", "inscode", "instrumentId", "instrumentid", default="") or "").strip() or None,
+        "inscode": str(pick(row, "insCode", "inscode", "instrumentId", "instrumentid", "id", default="") or "").strip() or None,
         "last": last if last is not None and last >= 0 else None,
         "close": close if close is not None and close >= 0 else None,
         "previous_close": prev if prev is not None and prev > 0 else None,
@@ -196,7 +196,10 @@ async def get_market_data():
         timeout = httpx.Timeout(TIMEOUT_SECONDS, connect=min(4.0, TIMEOUT_SECONDS))
         headers = UPSTREAM_HEADERS
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
-            for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
+            market_urls = [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]
+            if BRS_API_KEY:
+                market_urls.append("https://api.brsapi.ir/Tsetmc/AllSymbols.php?" + urlencode({"key": BRS_API_KEY, "type": 1}))
+            for url in market_urls:
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
@@ -253,7 +256,10 @@ async def diagnostics():
     results = []
     timeout = httpx.Timeout(min(5.0, TIMEOUT_SECONDS), connect=min(3.0, TIMEOUT_SECONDS))
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=UPSTREAM_HEADERS) as client:
-        for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
+        diagnostic_urls = [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]
+        if BRS_API_KEY:
+            diagnostic_urls.append("https://api.brsapi.ir/Tsetmc/AllSymbols.php?" + urlencode({"key": BRS_API_KEY, "type": 1}))
+        for url in diagnostic_urls:
             entry = {"host": urlparse(url).hostname, "ok": False, "http_status": None, "symbols": 0, "error": None}
             try:
                 response = await client.get(url)
