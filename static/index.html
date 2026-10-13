@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f5f8fc"><title>شکارچی فرصت بورس ایران</title>
+<style>
+:root{font-family:Tahoma,"Vazirmatn",Arial,sans-serif;color:#172235;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}header{background:#fff;border-bottom:1px solid #dfe7f0;padding:18px max(16px,calc((100% - 1100px)/2));display:flex;justify-content:space-between;align-items:center;gap:12px;position:sticky;top:0;z-index:3}h1{font-size:19px;margin:0 0 5px}.muted{color:#66758b;font-size:12px}.wrap{max-width:1100px;margin:auto;padding:16px}.status{border-radius:99px;padding:7px 11px;background:#e5e7eb;color:#374151;font-size:12px;font-weight:bold;white-space:nowrap}.LIVE{background:#dcfce7;color:#166534}.STALE{background:#fef3c7;color:#92400e}.OFFLINE{background:#fee2e2;color:#991b1b}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}.card{background:#fff;border:1px solid #e1e8f0;border-radius:15px;padding:15px;min-width:0}.label{font-size:12px;color:#65758b}.value{font-size:22px;font-weight:bold;margin-top:8px;overflow-wrap:anywhere}.tools{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.tools input{flex:1;min-width:150px;padding:12px;border:1px solid #cbd5e1;border-radius:10px;font:inherit;background:white}.tools button{border:0;background:#126b4d;color:white;padding:11px 15px;border-radius:10px;font:inherit;cursor:pointer}.notice{background:#fff8e6;border:1px solid #f3d28a;color:#704c09;border-radius:12px;padding:12px;font-size:13px;line-height:1.9}.tablewrap{overflow:auto;background:white;border:1px solid #e1e8f0;border-radius:14px}table{width:100%;border-collapse:collapse;min-width:720px;font-size:13px}th,td{text-align:right;padding:12px;border-bottom:1px solid #edf1f5;white-space:nowrap}th{background:#f8fafc;color:#58677d;font-weight:600}.neg{color:#b42318}.pos{color:#15803d}.small{font-size:11px;color:#66758b;line-height:1.8}.foot{margin:18px 2px;color:#64748b;font-size:11px;line-height:1.9}.empty{text-align:center;padding:28px;color:#66758b}@media(max-width:650px){header{padding:14px}.cards{grid-template-columns:1fr}.value{font-size:20px}.wrap{padding:12px}}
+</style>
+</head>
+<body>
+<header><div><h1>شکارچی فرصت بورس ایران</h1><div class="muted">اسکن بازار · بنیادی · جریان حقیقی/حقوقی</div></div><span id="status" class="status">در حال بررسی…</span></header>
+<main class="wrap">
+<div class="notice"><b>حفاظت از سرمایه:</b> این نسخه فقط اطلاعاتی را نمایش می‌دهد که از منبع قابل دریافت باشد. منفی بودن سهم یا خرید حقوقی به‌تنهایی سیگنال خرید نیست. تا زمان اعتبارسنجی تاریخچه قیمت، جریان حقیقی/حقوقی و صورت‌های مالی، خروجی خرید با برچسب «داده ناکافی» مسدود است.</div>
+<section class="cards">
+<div class="card"><div class="label">وضعیت منبع داده</div><div class="value" id="dataStatus">در حال بررسی</div><div class="small" id="source">—</div></div>
+<div class="card"><div class="label">نمادهای دریافت‌شده</div><div class="value" id="count">—</div><div class="small">از پاسخ واقعی منبع</div></div>
+<div class="card"><div class="label">سن داده</div><div class="value" id="age">—</div><div class="small" id="last">زمان دریافت ثبت نشده</div></div>
+</section>
+<div class="tools"><input id="search" placeholder="جست‌وجوی نماد یا نام شرکت…" autocomplete="off"><button id="all">همه نمادها</button><button id="negative">نمادهای منفی</button><button id="refresh">به‌روزرسانی</button></div>
+<div id="message" class="small"></div>
+<div class="tablewrap"><table><thead><tr><th>نماد</th><th>آخرین قیمت</th><th>تغییر روز</th><th>حجم</th><th>EPS</th><th>P/E</th><th>خالص خرید حقیقی</th><th>خالص خرید حقوقی</th><th>وضعیت تحلیل</th></tr></thead><tbody id="rows"><tr><td colspan="9" class="empty">در حال دریافت داده…</td></tr></tbody></table></div>
+<div class="foot">منابع هدف: TSETMC برای اطلاعات معاملاتی و کدال برای گزارش‌های مالی. اگر منبع مسدود، قطع یا قدیمی باشد، وضعیت در این صفحه مشخص می‌شود. اطلاعات بنیادی کامل و سیگنال معتبر تا اتصال و اعتبارسنجی منابع مربوطه در دسترس نیست. این ابزار سفارش خرید/فروش ثبت نمی‌کند.</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);let mode="all",timer=null;
+function fmt(v){if(v===null||v===undefined||v==="")return"—";return Number(v).toLocaleString("fa-IR",{maximumFractionDigits:2})}
+function render(items){$("rows").innerHTML="";if(!items||!items.length){$("rows").innerHTML='<tr><td colspan="9" class="empty">داده قابل نمایش وجود ندارد؛ وضعیت اتصال را بررسی کن.</td></tr>';return}
+for(const x of items){const tr=document.createElement("tr");const ch=x.change_pct;const cells=[x.symbol,x.last,x.change_pct===null?"—":fmt(ch)+"٪",x.volume,x.eps,x.pe,x.individual_net_volume,x.corporate_net_volume,x.signal||"INSUFFICIENT DATA"];cells.forEach((v,i)=>{const td=document.createElement("td");td.textContent=v===null||v===undefined?"—":v;if(i===2&&ch!==null)td.className=ch<0?"neg":"pos";tr.appendChild(td)});$("rows").appendChild(tr)}}
+async function loadStatus(){try{const r=await fetch("/api/status",{cache:"no-store"});const s=await r.json();$("status").className="status "+s.status;$("status").textContent=s.status;$("dataStatus").textContent=s.status;$("count").textContent=fmt(s.count);$("age").textContent=s.age_seconds===null?"—":fmt(s.age_seconds)+" ثانیه";$("last").textContent=s.last_received_at||"زمان دریافت ثبت نشده";$("source").textContent=s.source||s.error||"منبع هنوز تأیید نشده"}catch(e){$("status").className="status OFFLINE";$("status").textContent="OFFLINE";$("dataStatus").textContent="اتصال برقرار نیست"}}
+async function load(){await loadStatus();$("message").textContent="در حال دریافت فهرست واقعی نمادها…";try{let url=mode==="negative"?"/api/scan":"/api/market";const q=$("search").value.trim();if(mode!=="negative"&&q)url+="?q="+encodeURIComponent(q);const r=await fetch(url,{cache:"no-store"});const d=await r.json();render(mode==="negative"?(d.candidates||[]):(d.items||[]));$("message").textContent=d.warning||d.notice||("تعداد نتایج: "+fmt(d.count||0));if(d.status){$("status").className="status "+d.status;$("status").textContent=d.status}}catch(e){render([]);$("message").textContent="خطا در دریافت داده؛ هیچ سیگنالی تولید نشد."}}
+$("refresh").onclick=load;$("all").onclick=()=>{mode="all";load()};$("negative").onclick=()=>{mode="negative";load()};$("search").addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>{mode="all";load()},350)});load();setInterval(loadStatus,20000);
+</script>
+</body></html>
