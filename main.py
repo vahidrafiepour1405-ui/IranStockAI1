@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 APP_NAME = "شکارچی فرصت بورس ایران"
 MARKETWATCH_URLS = [
     os.getenv("TSETMC_MARKETWATCH_URL", "https://webgw.tse.ir/InstrumentProvider/api/v1/MarketWatch/MarketWatchCash/fa"),
-    "https://cdn.tsetmc.com/api/MarketData/GetMarketWatch"
+    "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0"
 ]
 FRESH_SECONDS = int(os.getenv("MAX_DATA_AGE_SECONDS", "180"))
 app = FastAPI(title=APP_NAME, version="0.1.0")
@@ -98,7 +98,7 @@ async def get_market_data():
         return _cache["data"], _cache["source"], None
     errors = []
     timeout = httpx.Timeout(8.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent":"IranStockScanner/0.1 contact: operator"}) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36","Accept":"application/json"}) as client:
         for url in MARKETWATCH_URLS:
             try:
                 response = await client.get(url)
