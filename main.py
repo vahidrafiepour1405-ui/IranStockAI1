@@ -7,7 +7,8 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
+import xml.etree.ElementTree as ET
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -119,6 +120,7 @@ def normalize(row: dict):
     name = scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default=""))
     return {
         "symbol": symbol, "name": str(name or "").strip(),
+        "inscode": str(pick(row, "insCode", "inscode", "instrumentId", "instrumentid", default="") or "").strip() or None,
         "last": last if last is not None and last >= 0 else None,
         "close": close if close is not None and close >= 0 else None,
         "previous_close": prev if prev is not None and prev > 0 else None,
@@ -308,6 +310,135 @@ async def quote(symbol: str):
         raise HTTPException(status_code=404, detail={"status": "INSUFFICIENT DATA", "message": "نماد در فهرست دریافت‌شده پیدا نشد."})
     return {"status": state, "source": urlparse(source).hostname if source else None,
             "received_at": data["received_at"], "item": match, "warning": warning}
+
+
+
+async def request_json(client: httpx.AsyncClient, url: str):
+    response = await client.get(url)
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        # Codal search sometimes responds as XML even when JSON is requested.
+        root = ET.fromstring(response.text)
+        def node_value(node):
+            children = list(node)
+            if not children:
+                return (node.text or "").strip()
+            out = {}
+            for child in children:
+                value = node_value(child)
+                if child.tag in out:
+                    if not isinstance(out[child.tag], list):
+                        out[child.tag] = [out[child.tag]]
+                    out[child.tag].append(value)
+                else:
+                    out[child.tag] = value
+            return out
+        return node_value(root)
+
+
+async def resolve_instrument(client: httpx.AsyncClient, symbol: str):
+    url = "https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/" + quote(symbol, safe="")
+    payload = await request_json(client, url)
+    rows = find_rows(payload)
+    for row in rows:
+        found_symbol = str(pick(row, "lVal18AFC", "symbol", "symbolName", default="") or "").strip()
+        inscode = pick(row, "insCode", "inscode", "instrumentId", "instrumentid")
+        if inscode and (not found_symbol or found_symbol.casefold() == symbol.casefold()):
+            return str(inscode), row
+    # Some responses are a single object or use a differently named collection.
+    if isinstance(payload, dict):
+        for key in ("instrumentSearch", "instrumentsearch", "instrumentInfo", "instrumentinfo"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for row in value:
+                    if isinstance(row, dict):
+                        inscode = pick(row, "insCode", "inscode")
+                        if inscode:
+                            return str(inscode), row
+    return None, None
+
+
+@app.get("/api/codal/{symbol}")
+async def codal_reports(symbol: str, limit: int = Query(default=20, ge=1, le=100)):
+    """Fetch actual public disclosures; prefer Codal search API, then TSETMC Codal proxy."""
+    timeout = httpx.Timeout(min(10.0, TIMEOUT_SECONDS), connect=min(4.0, TIMEOUT_SECONDS))
+    errors = []
+    headers = {**UPSTREAM_HEADERS, "Accept": "application/json, text/xml, application/xml, */*"}
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+        params = {"Symbol": symbol, "PageNumber": 1, "search": "true"}
+        direct = "https://search.codal.ir/api/search/v2/q?" + urlencode(params)
+        try:
+            payload = await request_json(client, direct)
+            if payload:
+                return {"status": "LIVE", "source": "search.codal.ir", "symbol": symbol,
+                        "received_at": utc_now(), "data": payload, "warning": None}
+            errors.append("CODAL_EMPTY_RESPONSE")
+        except Exception as exc:
+            errors.append(public_error(exc))
+        try:
+            inscode, instrument = await resolve_instrument(client, symbol)
+            if not inscode:
+                raise ValueError("INSTRUMENT_NOT_FOUND")
+            proxy = f"https://cdn.tsetmc.com/api/Codal/GetPreparedDataByInsCode/{limit}/{quote(inscode, safe='')}"
+            payload = await request_json(client, proxy)
+            if payload:
+                return {"status": "LIVE", "source": "cdn.tsetmc.com/api/Codal", "symbol": symbol,
+                        "inscode": inscode, "instrument": instrument, "received_at": utc_now(),
+                        "data": payload, "warning": "TSETMC proxy metadata; full report files may require Codal access"}
+            errors.append("TSETMC_CODAL_PROXY_EMPTY")
+        except Exception as exc:
+            errors.append(public_error(exc))
+    return JSONResponse(status_code=503, content={"status": "OFFLINE", "symbol": symbol, "data": [],
+                        "error": ";".join(dict.fromkeys(errors)), "message": "اطلاعیه‌های واقعی کدال از سرور دریافت نشد؛ داده ساختگی نمایش داده نمی‌شود."})
+
+
+@app.get("/api/analysis/{symbol}")
+async def analysis_data(symbol: str, history_limit: int = Query(default=250, ge=20, le=5000)):
+    """Fetch raw market history, investor flow and order-book data for downstream analysis."""
+    timeout = httpx.Timeout(min(12.0, TIMEOUT_SECONDS), connect=min(4.0, TIMEOUT_SECONDS))
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=UPSTREAM_HEADERS) as client:
+        try:
+            inscode, instrument = await resolve_instrument(client, symbol)
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={"status": "OFFLINE", "symbol": symbol,
+                                "error": public_error(exc), "message": "نماد از منبع واقعی بازار شناسایی نشد."})
+        if not inscode:
+            return JSONResponse(status_code=404, content={"status": "INSUFFICIENT DATA", "symbol": symbol,
+                                "message": "کد یکتای نماد از منبع بازار دریافت نشد."})
+        urls = {
+            "history": f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceDailyList/{quote(inscode, safe='')}/{history_limit}",
+            "investor_flow": f"https://cdn.tsetmc.com/api/ClientType/GetClientTypeHistory/{quote(inscode, safe='')}",
+            "order_book": f"https://cdn.tsetmc.com/api/BestLimits/{quote(inscode, safe='')}",
+            "instrument_info": f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentInfo/{quote(inscode, safe='')}",
+        }
+        async def fetch_one(url):
+            try:
+                return {"ok": True, "data": await request_json(client, url), "error": None}
+            except Exception as exc:
+                return {"ok": False, "data": None, "error": public_error(exc)}
+        names = list(urls)
+        results = await asyncio.gather(*(fetch_one(urls[name]) for name in names))
+        parts = dict(zip(names, results))
+        ok_count = sum(1 for item in results if item["ok"])
+        return {"status": "LIVE" if ok_count == len(results) else ("PARTIAL" if ok_count else "OFFLINE"),
+                "symbol": symbol, "inscode": inscode, "instrument": instrument, "source": "cdn.tsetmc.com",
+                "received_at": utc_now(), "history_limit": history_limit, "data": parts,
+                "available_components": [name for name, item in parts.items() if item["ok"]],
+                "unavailable_components": {name: item["error"] for name, item in parts.items() if not item["ok"]},
+                "note": "Raw source data only; indicators/signals must not be claimed unless computed and validated from these records."}
+
+
+@app.get("/api/data-sources")
+async def data_sources():
+    """Advertise data connectors and their current verification status without claiming they are live."""
+    return {"app": "IranStockAI", "checked_at": utc_now(), "connectors": [
+        {"name": "TSETMC MarketWatch", "kind": "market prices", "endpoint": "/api/market", "status": "verified only by live diagnostics"},
+        {"name": "TSETMC historical prices, investor flow, order book, instrument info", "kind": "analysis inputs", "endpoint": "/api/analysis/{symbol}", "status": "tested on request; may be geo-blocked"},
+        {"name": "Codal public disclosures", "kind": "company filings", "endpoint": "/api/codal/{symbol}", "status": "tested on request; may be geo-blocked"},
+        {"name": "Mofid brokerage", "kind": "broker account", "status": "not connected; no official API credentials supplied"},
+    ], "policy": "No fabricated data; unavailable sources return OFFLINE or INSUFFICIENT DATA."}
 
 
 @app.get("/api/history/{symbol}")
