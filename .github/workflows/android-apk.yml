@@ -42,7 +42,7 @@ jobs:
       - name: Publish downloadable APK release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-v1.0.\${{ github.run_number }}
-          name: IranStockAI Android v1.0.\${{ github.run_number }}
+          tag_name: android-v1.0.${{ github.run_number }}
+          name: IranStockAI Android v1.0.${{ github.run_number }}
           files: output/IranStockAI-1.0.0.apk
           make_latest: true
