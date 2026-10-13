@@ -19,11 +19,19 @@ VERSION = "1.0.0"
 FRESH_SECONDS = max(15, int(os.getenv("MAX_DATA_AGE_SECONDS", "180")))
 CACHE_SECONDS = max(5, int(os.getenv("MARKET_CACHE_SECONDS", "20")))
 TIMEOUT_SECONDS = max(2, min(15, float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "8"))))
+MARKETWATCH_QUERY = "?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0"
 MARKETWATCH_URLS = [
     os.getenv("TSETMC_MARKETWATCH_URL", "https://webgw.tse.ir/InstrumentProvider/api/v1/MarketWatch/MarketWatchCash/fa"),
-    "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0",
+    "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch" + MARKETWATCH_QUERY,
+    "https://cdn10.tsetmc.com/api/ClosingPrice/GetMarketWatch" + MARKETWATCH_QUERY,
 ]
 LEGACY_MARKETWATCH_URL = "https://old.tsetmc.com/tsev2/data/MarketWatchInit.aspx?h=0&r=0"
+UPSTREAM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,text/csv,text/html,*/*",
+    "Referer": "https://www.tsetmc.com/",
+    "Origin": "https://www.tsetmc.com",
+}
 app = FastAPI(title=APP_NAME, version=VERSION, description="Market data API; missing data is explicitly reported.")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -183,7 +191,7 @@ async def get_market_data():
             return _cache["data"], _cache["source"], None, "LIVE" if age <= FRESH_SECONDS else "STALE"
         errors = []
         timeout = httpx.Timeout(TIMEOUT_SECONDS, connect=min(4.0, TIMEOUT_SECONDS))
-        headers = {"User-Agent": "IranStockAI/1.0 (market data client)", "Accept": "application/json,text/plain"}
+        headers = UPSTREAM_HEADERS
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
                 try:
@@ -241,7 +249,7 @@ async def status():
 async def diagnostics():
     results = []
     timeout = httpx.Timeout(min(5.0, TIMEOUT_SECONDS), connect=min(3.0, TIMEOUT_SECONDS))
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent": "IranStockAI/1.0", "Accept": "application/json,text/plain"}) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=UPSTREAM_HEADERS) as client:
         for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
             entry = {"host": urlparse(url).hostname, "ok": False, "http_status": None, "symbols": 0, "error": None}
             try:
