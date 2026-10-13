@@ -1,0 +1,13 @@
+{
+  "name": "شکارچی فرصت بورس ایران",
+  "short_name": "IranStockAI",
+  "description": "اسکن بازار بورس ایران با نمایش شفاف وضعیت داده",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#f5f8fc",
+  "icons": []
+}
