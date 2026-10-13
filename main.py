@@ -130,13 +130,17 @@ async def health():
 
 @app.get("/api/status")
 async def status():
-    data, source, error = await get_market_data()
+    # Do not trigger a second upstream market request just to render the status card.
+    # /api/market and /api/scan are responsible for refreshing market data.
     age = int(time.time() - _cache["at"]) if _cache["at"] else None
+    data = _cache["data"]
+    error = _cache["error"]
     live = bool(data and age is not None and age <= FRESH_SECONDS and not error)
+    state = "LIVE" if live else ("STALE" if data else "OFFLINE")
     return {
-        "status": "LIVE" if live else ("STALE" if data else "OFFLINE"),
+        "status": state,
         "market_data_available": bool(data), "count": data["count"] if data else 0,
-        "source": source, "age_seconds": age, "max_age_seconds": FRESH_SECONDS,
+        "source": _cache["source"], "age_seconds": age, "max_age_seconds": FRESH_SECONDS,
         "last_received_at": data["received_at"] if data else None,
         "error": error, "signal_policy": "fail-closed: no BUY signals without validated history, flow and fundamentals"
     }
