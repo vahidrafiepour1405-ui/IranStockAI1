@@ -1,236 +1,335 @@
-import os, time
+"""IranStockAI: conservative, source-labelled Iranian market data API.
+
+Market data is never fabricated. Unknown history/fundamentals produce INSUFFICIENT DATA.
+"""
+import asyncio
+import os
+import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
+
 import httpx
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-APP_NAME = "شکارچی فرصت بورس ایران"
+APP_NAME = "IranStockAI — شکارچی فرصت بورس ایران"
+VERSION = "1.0.0"
+FRESH_SECONDS = max(15, int(os.getenv("MAX_DATA_AGE_SECONDS", "180")))
+CACHE_SECONDS = max(5, int(os.getenv("MARKET_CACHE_SECONDS", "20")))
+TIMEOUT_SECONDS = max(2, min(15, float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "8"))))
 MARKETWATCH_URLS = [
     os.getenv("TSETMC_MARKETWATCH_URL", "https://webgw.tse.ir/InstrumentProvider/api/v1/MarketWatch/MarketWatchCash/fa"),
-    "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0"
+    "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0",
 ]
-# Legacy TSETMC endpoint is a fallback because the newer CDN market-watch
-# endpoint can return an empty list even when reachable.
 LEGACY_MARKETWATCH_URL = "https://old.tsetmc.com/tsev2/data/MarketWatchInit.aspx?h=0&r=0"
-FRESH_SECONDS = int(os.getenv("MAX_DATA_AGE_SECONDS", "180"))
-app = FastAPI(title=APP_NAME, version="0.1.0")
+app = FastAPI(title=APP_NAME, version=VERSION, description="Market data API; missing data is explicitly reported.")
 app.mount("/static", StaticFiles(directory="static"), name="static")
-_cache: dict[str, Any] = {"at": 0, "data": None, "source": None, "error": None}
+
+_cache: dict[str, Any] = {"at": None, "data": None, "source": None, "error": None}
+_refresh_lock = asyncio.Lock()
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 def pick(d: dict, *keys, default=None):
-    for k in keys:
-        if k in d and d[k] not in (None, ""):
-            return d[k]
-    low = {str(k).lower(): v for k, v in d.items()}
-    for k in keys:
-        if k.lower() in low and low[k.lower()] not in (None, ""):
-            return low[k.lower()]
+    for key in keys:
+        if key in d and d[key] not in (None, ""):
+            return d[key]
+    lower = {str(k).lower(): v for k, v in d.items()}
+    for key in keys:
+        value = lower.get(key.lower())
+        if value not in (None, ""):
+            return value
     return default
 
+
+def scalar(value):
+    if isinstance(value, dict):
+        for key in ("value", "Value", "lastValue", "amount"):
+            if key in value:
+                return value[key]
+    return value
+
+
+def norm_num(value):
+    try:
+        value = scalar(value)
+        if value is None or value == "":
+            return None
+        number = float(str(value).replace(",", "").strip())
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
 def find_rows(obj):
-    """Find plausible instrument arrays without assuming one upstream JSON schema."""
+    keys_of_interest = {"symbol", "lval18afc", "inscode", "instrumentid", "isin", "instrumentname", "instrument_name", "companynamepersian"}
     if isinstance(obj, list):
-        if obj and any(isinstance(x, dict) and any(k in {str(a).lower() for a in x} for k in ("symbol","lval18afc","inscode","instrumentid","isin","instrumentname","instrument_name","companynamepersian")) for x in obj[:10]):
+        if obj and any(isinstance(x, dict) and keys_of_interest.intersection(str(k).lower() for k in x) for x in obj[:10]):
             return obj
         for item in obj:
             found = find_rows(item)
             if found:
                 return found
     elif isinstance(obj, dict):
-        for key in ("instrumentinfos", "marketwatch", "marketwatchcash", "data", "items", "instruments", "instrumentlist"):
-            if key in {str(k).lower() for k in obj}:
-                for k,v in obj.items():
-                    if str(k).lower() == key:
-                        found = find_rows(v)
-                        if found: return found
-        for v in obj.values():
-            found = find_rows(v)
-            if found: return found
+        preferred = {"instrumentinfos", "marketwatch", "marketwatchcash", "data", "items", "instruments", "instrumentlist"}
+        for key, value in obj.items():
+            if str(key).lower() in preferred:
+                found = find_rows(value)
+                if found:
+                    return found
+        for value in obj.values():
+            found = find_rows(value)
+            if found:
+                return found
     return []
 
-def scalar(v):
-    # TSE gateway often wraps numbers as {"value": ..., "state": ...}.
-    if isinstance(v, dict):
-        for key in ("value", "Value", "lastValue", "amount"):
-            if key in v:
-                return v[key]
-    return v
 
-def norm_num(v):
-    try:
-        v = scalar(v)
-        if v is None or v == "": return None
-        return float(str(v).replace(",", ""))
-    except (ValueError, TypeError):
+def normalize(row: dict):
+    symbol = scalar(pick(row, "symbol", "lval18aFC", "lval18a", "ticker", "shortName", "instrumentName", "instrument_Name", "instrumentname"))
+    if not isinstance(symbol, (str, int)) or not str(symbol).strip():
         return None
-
-def normalize(row):
-    sym = pick(row, "symbol", "lval18aFC", "lval18a", "ticker", "shortName", "Symbol", "instrumentName", "instrument_Name", "instrumentname")
-    if isinstance(sym, dict): sym = scalar(sym)
-    if not sym: return None
+    symbol = str(symbol).strip()
     last = norm_num(pick(row, "last_price", "lastPrice", "lastprice", "pDrCotVal", "pl", "last"))
     close = norm_num(pick(row, "adj_closing_price", "closingPrice", "closingprice", "pClosing", "pc", "close"))
     prev = norm_num(pick(row, "yesterday_price", "yesterdayPrice", "yesterdayprice", "priceYesterday", "py"))
-    vol = norm_num(pick(row, "volume_of_trans", "volume", "tradeVolume", "tradevolume", "qTotTran5J", "vol"))
+    volume = norm_num(pick(row, "volume_of_trans", "volume", "tradeVolume", "tradevolume", "qTotTran5J", "vol"))
     value = norm_num(pick(row, "value_of_trans", "value", "tradeValue", "tradevalue", "qTotCap"))
     eps = norm_num(pick(row, "EPS", "eps", "estimatedEPS"))
     pe = norm_num(pick(row, "P/E", "pe", "pE", "priceEarningRatio"))
-    change = ((last / prev) - 1) * 100 if last and prev else None
-    # Flow fields are included only if upstream actually supplies them.
-    ind_buy = norm_num(pick(row, "individual_buy_vol", "individualBuyVolume", "vol_individual_buy", "BuyVolumeIndividual"))
-    ind_sell = norm_num(pick(row, "individual_sell_vol", "individualSellVolume", "vol_individual_sell", "SellVolumeIndividual"))
-    corp_buy = norm_num(pick(row, "corporate_buy_vol", "corporateBuyVolume", "vol_corporate_buy", "BuyVolumeCorporate"))
-    corp_sell = norm_num(pick(row, "corporate_sell_vol", "corporateSellVolume", "vol_corporate_sell", "SellVolumeCorporate"))
+    change = ((last / prev) - 1) * 100 if last is not None and prev is not None and last >= 0 and prev > 0 else None
+    ib = norm_num(pick(row, "individual_buy_vol", "individualBuyVolume", "vol_individual_buy", "BuyVolumeIndividual"))
+    ise = norm_num(pick(row, "individual_sell_vol", "individualSellVolume", "vol_individual_sell", "SellVolumeIndividual"))
+    cb = norm_num(pick(row, "corporate_buy_vol", "corporateBuyVolume", "vol_corporate_buy", "BuyVolumeCorporate"))
+    cs = norm_num(pick(row, "corporate_sell_vol", "corporateSellVolume", "vol_corporate_sell", "SellVolumeCorporate"))
+    name = scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default=""))
     return {
-        "symbol": str(sym).strip(), "name": scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default="")),
-        "last": last, "close": close, "change_pct": change, "volume": vol, "value": value,
+        "symbol": symbol, "name": str(name or "").strip(),
+        "last": last if last is not None and last >= 0 else None,
+        "close": close if close is not None and close >= 0 else None,
+        "previous_close": prev if prev is not None and prev > 0 else None,
+        "change_pct": change, "volume": volume if volume is not None and volume >= 0 else None,
+        "value": value if value is not None and value >= 0 else None,
         "eps": eps, "pe": pe,
-        "individual_net_volume": (ind_buy - ind_sell) if ind_buy is not None and ind_sell is not None else None,
-        "corporate_net_volume": (corp_buy - corp_sell) if corp_buy is not None and corp_sell is not None else None,
-        "flow_available": all(x is not None for x in (ind_buy, ind_sell, corp_buy, corp_sell)),
+        "individual_net_volume": ib - ise if ib is not None and ise is not None else None,
+        "corporate_net_volume": cb - cs if cb is not None and cs is not None else None,
+        "flow_available": all(v is not None for v in (ib, ise, cb, cs)),
         "fundamental_status": "INSUFFICIENT DATA",
         "signal": "INSUFFICIENT DATA",
-        "signal_reason": "برای سیگنال معتبر، تاریخچه قیمت، جریان حقیقی/حقوقی و صورت‌های مالی معتبر باید هم‌زمان تأیید شوند."
+        "signal_reason": "تاریخچه معتبر و داده بنیادی/جریان معتبر کافی نیست؛ سیگنال صادر نشد.",
     }
 
+
 def parse_legacy_marketwatch(raw: str) -> list[dict]:
-    """Parse the legacy TSETMC MarketWatchInit.aspx @/semicolon format."""
     parts = raw.split("@")
     if len(parts) < 3:
         return []
-    rows = []
+    result = []
     for line in parts[2].split(";"):
         cols = line.strip().split(",")
-        # documented columns: insCode, isin, l18, l30, hEven, pf, pc, pl,
-        # tno, tvol, tval, pmin, pmax, py, eps, ...
         if len(cols) < 15:
             continue
-        row = {
-            "symbol": cols[2], "name": cols[3],
-            "pClosing": cols[6], "pDrCotVal": cols[7],
-            "qTotTran5J": cols[9], "qTotCap": cols[10],
-            "priceYesterday": cols[13], "eps": cols[14],
-        }
-        item = normalize(row)
+        item = normalize({"symbol": cols[2], "name": cols[3], "pClosing": cols[6],
+                          "pDrCotVal": cols[7], "qTotTran5J": cols[9], "qTotCap": cols[10],
+                          "priceYesterday": cols[13], "eps": cols[14]})
         if item:
-            rows.append(item)
-    return rows
+            result.append(item)
+    return result
+
+
+def parse_market_response(url: str, response: httpx.Response) -> list[dict]:
+    if url == LEGACY_MARKETWATCH_URL:
+        rows = parse_legacy_marketwatch(response.text)
+    else:
+        payload = response.json()
+        raw_rows = find_rows(payload)
+        rows = [item for item in (normalize(row) for row in raw_rows if isinstance(row, dict)) if item]
+    # A response with a schema mismatch is not a healthy source.
+    seen, unique = set(), []
+    for item in rows:
+        key = item["symbol"]
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def public_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "UPSTREAM_TIMEOUT"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"UPSTREAM_HTTP_{exc.response.status_code}"
+    if isinstance(exc, (ValueError, TypeError)):
+        return "UPSTREAM_INVALID_RESPONSE"
+    if isinstance(exc, httpx.HTTPError):
+        return "UPSTREAM_CONNECTION_ERROR"
+    return "UPSTREAM_ERROR"
+
 
 async def get_market_data():
     now = time.time()
-    if _cache["data"] and now - _cache["at"] < 20:
-        return _cache["data"], _cache["source"], None
-    errors = []
-    timeout = httpx.Timeout(8.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36","Accept":"application/json"}) as client:
-        for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                if url == LEGACY_MARKETWATCH_URL:
-                    normalized = parse_legacy_marketwatch(response.text)
-                else:
-                    payload = response.json()
-                    rows = find_rows(payload)
-                    normalized = [x for x in (normalize(r) for r in rows if isinstance(r, dict)) if x]
-                if not normalized:
-                    errors.append(f"{url}: پاسخ دریافت شد اما نمادی در ساختار پاسخ پیدا نشد")
-                    continue
-                result = {"items": normalized, "received_at": datetime.now(timezone.utc).isoformat(), "count": len(normalized)}
-                _cache.update({"at": now, "data": result, "source": url, "error": None})
-                return result, url, None
-            except Exception as exc:
-                errors.append(f"{url}: {type(exc).__name__}: {str(exc)[:180]}")
-    _cache["error"] = " | ".join(errors)
-    if _cache["data"]:
-        age = int(now - _cache["at"])
-        return _cache["data"], _cache["source"], f"منبع زنده در دسترس نیست؛ داده ذخیره‌شده {age} ثانیه عمر دارد."
-    return None, None, _cache["error"]
+    if _cache["data"] is not None and _cache["at"] is not None and now - _cache["at"] < CACHE_SECONDS and not _cache["error"]:
+        return _cache["data"], _cache["source"], None, "LIVE"
+    async with _refresh_lock:
+        now = time.time()
+        if _cache["data"] is not None and _cache["at"] is not None and now - _cache["at"] < CACHE_SECONDS and not _cache["error"]:
+            age = now - _cache["at"]
+            return _cache["data"], _cache["source"], None, "LIVE" if age <= FRESH_SECONDS else "STALE"
+        errors = []
+        timeout = httpx.Timeout(TIMEOUT_SECONDS, connect=min(4.0, TIMEOUT_SECONDS))
+        headers = {"User-Agent": "IranStockAI/1.0 (market data client)", "Accept": "application/json,text/plain"}
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+            for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    items = parse_market_response(url, response)
+                    if not items:
+                        errors.append("UPSTREAM_EMPTY_OR_UNKNOWN_SCHEMA")
+                        continue
+                    received_at = utc_now()
+                    result = {"items": items, "received_at": received_at, "count": len(items)}
+                    _cache.update({"at": time.time(), "data": result, "source": url, "error": None})
+                    return result, url, None, "LIVE"
+                except Exception as exc:
+                    errors.append(public_error(exc))
+        # Never pretend the cache is live after a failed refresh.
+        _cache["error"] = ";".join(dict.fromkeys(errors)) or "UPSTREAM_UNAVAILABLE"
+        if _cache["data"] is not None and _cache["at"] is not None:
+            age = max(0, int(time.time() - _cache["at"]))
+            return _cache["data"], _cache["source"], _cache["error"], "STALE"
+        return None, None, _cache["error"], "OFFLINE"
+
 
 @app.get("/")
 async def home():
     return FileResponse("static/index.html")
 
+
 @app.get("/health")
 async def health():
-    return {"ok": True, "app": APP_NAME, "version": "0.1.0", "utc": datetime.now(timezone.utc).isoformat()}
+    # Liveness only: upstream outages should not cause Render restart loops.
+    return {"ok": True, "app": "IranStockAI", "version": VERSION, "utc": utc_now()}
+
 
 @app.get("/api/status")
 async def status():
-    # Do not trigger a second upstream market request just to render the status card.
-    # /api/market and /api/scan are responsible for refreshing market data.
-    age = int(time.time() - _cache["at"]) if _cache["at"] else None
+    age = max(0, int(time.time() - _cache["at"])) if _cache["at"] is not None else None
     data = _cache["data"]
-    error = _cache["error"]
-    live = bool(data and age is not None and age <= FRESH_SECONDS and not error)
-    state = "LIVE" if live else ("STALE" if data else "OFFLINE")
+    if data is None:
+        state = "OFFLINE"
+    elif _cache["error"] or age is None or age > FRESH_SECONDS:
+        state = "STALE"
+    else:
+        state = "LIVE"
     return {
-        "status": state,
-        "market_data_available": bool(data), "count": data["count"] if data else 0,
-        "source": _cache["source"], "age_seconds": age, "max_age_seconds": FRESH_SECONDS,
+        "status": state, "market_data_available": data is not None,
+        "count": data["count"] if data else 0, "source": _cache["source"],
+        "age_seconds": age, "max_age_seconds": FRESH_SECONDS,
         "last_received_at": data["received_at"] if data else None,
-        "error": error, "signal_policy": "fail-closed: no BUY signals without validated history, flow and fundamentals"
+        "error": _cache["error"], "signal_policy": "fail-closed",
     }
+
 
 @app.get("/api/diagnostics")
 async def diagnostics():
-    """Probe each upstream market-watch endpoint and report whether it yields parseable rows."""
     results = []
-    timeout = httpx.Timeout(5.0, connect=3.0)
-    headers = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36","Accept":"application/json"}
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+    timeout = httpx.Timeout(min(5.0, TIMEOUT_SECONDS), connect=min(3.0, TIMEOUT_SECONDS))
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent": "IranStockAI/1.0", "Accept": "application/json,text/plain"}) as client:
         for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
-            entry = {"url": url, "ok": False, "http_status": None, "symbols": 0, "error": None}
+            entry = {"host": urlparse(url).hostname, "ok": False, "http_status": None, "symbols": 0, "error": None}
             try:
                 response = await client.get(url)
                 entry["http_status"] = response.status_code
                 response.raise_for_status()
-                if url == LEGACY_MARKETWATCH_URL:
-                    items = parse_legacy_marketwatch(response.text)
-                else:
-                    try:
-                        payload = response.json()
-                    except Exception as exc:
-                        raise ValueError("Response was not valid JSON") from exc
-                    rows = find_rows(payload)
-                    items = [x for x in (normalize(row) for row in rows if isinstance(row, dict)) if x]
+                items = parse_market_response(url, response)
                 entry["symbols"] = len(items)
-                entry["ok"] = len(items) > 0
+                entry["ok"] = bool(items)
                 if not items:
-                    entry["error"] = "Response received but no parseable instruments found"
+                    entry["error"] = "EMPTY_OR_UNKNOWN_SCHEMA"
             except Exception as exc:
-                entry["error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+                entry["error"] = public_error(exc)
             results.append(entry)
-    good = next((x for x in results if x["ok"]), None)
-    return {
-        "app": APP_NAME,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-        "market_data_source_working": bool(good),
-        "working_source": good["url"] if good else None,
-        "symbol_count": good["symbols"] if good else 0,
-        "results": results,
-        "note": "This diagnostic probes the upstream sources from the Render server; it does not use sample data."
-    }
+    good = next((item for item in results if item["ok"]), None)
+    return {"app": "IranStockAI", "checked_at": utc_now(), "market_data_source_working": bool(good),
+            "working_source": good["host"] if good else None, "symbol_count": good["symbols"] if good else 0,
+            "results": results, "note": "Checks are performed from this server; no sample data is used."}
+
 
 @app.get("/api/market")
-async def market(q: str = "", limit: int = 500):
-    data, source, error = await get_market_data()
-    if not data:
-        return {"status":"OFFLINE","items":[],"error":error,"message":"داده زنده دریافت نشد؛ هیچ داده ساختگی نمایش داده نمی‌شود."}
+async def market(q: str = Query(default="", max_length=100), limit: int = Query(default=200, ge=1, le=500)):
+    data, source, warning, state = await get_market_data()
+    if data is None:
+        return JSONResponse(status_code=503, content={"status": "OFFLINE", "items": [], "count": 0,
+                            "error": warning, "message": "داده زنده دریافت نشد؛ داده ساختگی نمایش داده نمی‌شود."})
     items = data["items"]
-    if q:
-        q = q.strip().lower()
-        items = [x for x in items if q in x["symbol"].lower() or q in x["name"].lower()]
-    return {"status":"LIVE" if not error else "STALE","source":source,"received_at":data["received_at"],"count":len(items),"items":items[:max(1,min(limit,1000))],"warning":error}
+    query = q.strip().casefold()
+    if query:
+        items = [item for item in items if query in item["symbol"].casefold() or query in item["name"].casefold()]
+    return {"status": state, "source": urlparse(source).hostname if source else None,
+            "received_at": data["received_at"], "count": len(items), "items": items[:limit], "warning": warning}
+
 
 @app.get("/api/scan")
 async def scan():
-    data, source, error = await get_market_data()
-    if not data:
-        return {"status":"OFFLINE","candidates":[],"message":"اسکن متوقف شد؛ منبع داده در دسترس نیست."}
-    # A negative price change is only a candidate filter, never a BUY signal.
-    candidates = [x for x in data["items"] if x["change_pct"] is not None and -5.0 <= x["change_pct"] < 0]
-    candidates.sort(key=lambda x: x["change_pct"], reverse=True)
-    return {"status":"LIVE" if not error else "STALE","source":source,"received_at":data["received_at"],"count":len(candidates),"candidates":candidates[:100],"notice":"این فهرست فقط نمادهای منفی را غربال می‌کند؛ تا زمانی که تاریخچه تکنیکال، جریان حقیقی/حقوقی و داده بنیادی معتبر به نماد وصل نشده، سیگنال خرید صادر نمی‌شود.","warning":error}
+    data, source, warning, state = await get_market_data()
+    if data is None:
+        return JSONResponse(status_code=503, content={"status": "OFFLINE", "candidates": [], "count": 0,
+                            "message": "اسکن متوقف شد؛ منبع داده در دسترس نیست."})
+    candidates = [item for item in data["items"] if item["change_pct"] is not None and -5 <= item["change_pct"] < 0]
+    candidates.sort(key=lambda item: item["change_pct"], reverse=True)
+    return {"status": state, "source": urlparse(source).hostname if source else None,
+            "received_at": data["received_at"], "count": len(candidates), "candidates": candidates[:100],
+            "notice": "غربال تغییرات قیمت، سیگنال خرید نیست. تاریخچه کافی و اعتبارسنجی بنیادی موجود نیست.",
+            "warning": warning}
+
+
+@app.get("/api/quote/{symbol}")
+async def quote(symbol: str):
+    data, source, warning, state = await get_market_data()
+    if data is None:
+        raise HTTPException(status_code=503, detail={"status": "OFFLINE", "message": "داده بازار در دسترس نیست."})
+    match = next((item for item in data["items"] if item["symbol"].casefold() == symbol.strip().casefold()), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail={"status": "INSUFFICIENT DATA", "message": "نماد در فهرست دریافت‌شده پیدا نشد."})
+    return {"status": state, "source": urlparse(source).hostname if source else None,
+            "received_at": data["received_at"], "item": match, "warning": warning}
+
+
+@app.get("/api/history/{symbol}")
+async def history(symbol: str):
+    return {"symbol": symbol, "status": "INSUFFICIENT DATA", "items": [],
+            "message": "منبع تاریخچه معتبر به این نماد متصل نشده است؛ نمودار و شاخص تاریخی تولید نمی‌شود."}
+
+
+@app.get("/api/fundamentals/{symbol}")
+async def fundamentals(symbol: str):
+    return {"symbol": symbol, "status": "INSUFFICIENT DATA", "source": None, "items": [],
+            "message": "اتصال و اعتبارسنجی داده بنیادی کدال هنوز تأیید نشده است؛ مقدار بنیادی فرضی ارائه نمی‌شود."}
+
+
+@app.get("/api/signals/{symbol}")
+async def signals(symbol: str):
+    data, source, warning, state = await get_market_data()
+    item = next((x for x in data["items"] if x["symbol"].casefold() == symbol.strip().casefold()), None) if data else None
+    if item is None:
+        return {"symbol": symbol, "status": "INSUFFICIENT DATA" if data else "OFFLINE",
+                "signal": "INSUFFICIENT DATA", "reason": "قیمت مرجع معتبر برای این نماد موجود نیست.",
+                "generated_at": utc_now(), "reference_price": None, "invalidation": None, "source": None}
+    return {"symbol": item["symbol"], "status": "INSUFFICIENT DATA", "signal": "INSUFFICIENT DATA",
+            "reason": "داده روزانه به‌تنهایی برای سیگنال کافی نیست؛ تاریخچه معتبر و آزمون‌شده در دسترس نیست.",
+            "generated_at": utc_now(), "reference_price": item["last"], "reference_received_at": data["received_at"],
+            "source": urlparse(source).hostname if source else None, "invalidation": None, "warning": warning}
+
+
+@app.on_event("startup")
+async def validate_static_assets():
+    # Keep startup failure explicit if the app package is incomplete.
+    if not os.path.isfile(os.path.join("static", "index.html")):
+        raise RuntimeError("Required static/index.html is missing")
