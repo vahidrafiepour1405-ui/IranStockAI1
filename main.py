@@ -174,6 +174,46 @@ async def status():
         "error": error, "signal_policy": "fail-closed: no BUY signals without validated history, flow and fundamentals"
     }
 
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """Probe each upstream market-watch endpoint and report whether it yields parseable rows."""
+    results = []
+    timeout = httpx.Timeout(5.0, connect=3.0)
+    headers = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36","Accept":"application/json"}
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+        for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
+            entry = {"url": url, "ok": False, "http_status": None, "symbols": 0, "error": None}
+            try:
+                response = await client.get(url)
+                entry["http_status"] = response.status_code
+                response.raise_for_status()
+                if url == LEGACY_MARKETWATCH_URL:
+                    items = parse_legacy_marketwatch(response.text)
+                else:
+                    try:
+                        payload = response.json()
+                    except Exception as exc:
+                        raise ValueError("Response was not valid JSON") from exc
+                    rows = find_rows(payload)
+                    items = [x for x in (normalize(row) for row in rows if isinstance(row, dict)) if x]
+                entry["symbols"] = len(items)
+                entry["ok"] = len(items) > 0
+                if not items:
+                    entry["error"] = "Response received but no parseable instruments found"
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+            results.append(entry)
+    good = next((x for x in results if x["ok"]), None)
+    return {
+        "app": APP_NAME,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "market_data_source_working": bool(good),
+        "working_source": good["url"] if good else None,
+        "symbol_count": good["symbols"] if good else 0,
+        "results": results,
+        "note": "This diagnostic probes the upstream sources from the Render server; it does not use sample data."
+    }
+
 @app.get("/api/market")
 async def market(q: str = "", limit: int = 500):
     data, source, error = await get_market_data()
