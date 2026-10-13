@@ -118,7 +118,7 @@ def normalize(row: dict):
     ise = norm_num(pick(row, "individual_sell_vol", "individualSellVolume", "vol_individual_sell", "SellVolumeIndividual"))
     cb = norm_num(pick(row, "corporate_buy_vol", "corporateBuyVolume", "vol_corporate_buy", "BuyVolumeCorporate"))
     cs = norm_num(pick(row, "corporate_sell_vol", "corporateSellVolume", "vol_corporate_sell", "SellVolumeCorporate"))
-    name = scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default=""))
+    name = scalar(pick(row, "name", "l30", "lval30", "companyName", "companyNamePersian", default=""))
     return {
         "symbol": symbol, "name": str(name or "").strip(),
         "inscode": str(pick(row, "insCode", "inscode", "instrumentId", "instrumentid", "id", default="") or "").strip() or None,
