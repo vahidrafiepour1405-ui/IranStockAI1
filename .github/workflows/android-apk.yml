@@ -1,0 +1,48 @@
+name: Build IranStockAI Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - name: Prepare APK
+        run: |
+          mkdir -p output
+          cp android/app/build/outputs/apk/debug/app-debug.apk output/IranStockAI-1.0.0.apk
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IranStockAI-Android-APK
+          path: output/IranStockAI-1.0.0.apk
+          retention-days: 30
+      - name: Publish downloadable APK release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-v1.0.\${{ github.run_number }}
+          name: IranStockAI Android v1.0.\${{ github.run_number }}
+          files: output/IranStockAI-1.0.0.apk
+          make_latest: true
