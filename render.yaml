@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: iran-stock-ai
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MAX_DATA_AGE_SECONDS
+        value: "180"
