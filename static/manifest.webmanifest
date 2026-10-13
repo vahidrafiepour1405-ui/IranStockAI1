@@ -1,7 +1,7 @@
 {
-  "name": "شکارچی فرصت بورس ایران",
+  "name": "IranStockAI — شکارچی فرصت بورس ایران",
   "short_name": "IranStockAI",
-  "description": "اسکن بازار بورس ایران با نمایش شفاف وضعیت داده",
+  "description": "تحلیل شفاف بازار بورس ایران با نمایش صادقانه کیفیت داده",
   "lang": "fa",
   "dir": "rtl",
   "start_url": "/",
@@ -9,5 +9,8 @@
   "display": "standalone",
   "background_color": "#f4f7fb",
   "theme_color": "#f5f8fc",
-  "icons": []
+  "icons": [
+    {"src": "/static/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any"},
+    {"src": "/static/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any"}
+  ]
 }
