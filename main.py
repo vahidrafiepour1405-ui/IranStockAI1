@@ -29,7 +29,7 @@ def pick(d: dict, *keys, default=None):
 def find_rows(obj):
     """Find plausible instrument arrays without assuming one upstream JSON schema."""
     if isinstance(obj, list):
-        if obj and any(isinstance(x, dict) and any(k in {str(a).lower() for a in x} for k in ("symbol","lval18aFC","inscode","instrumentid","isin")) for x in obj[:10]):
+        if obj and any(isinstance(x, dict) and any(k in {str(a).lower() for a in x} for k in ("symbol","lval18afc","inscode","instrumentid","isin","instrumentname","instrument_name","companynamepersian")) for x in obj[:10]):
             return obj
         for item in obj:
             found = find_rows(item)
@@ -47,21 +47,31 @@ def find_rows(obj):
             if found: return found
     return []
 
+def scalar(v):
+    # TSE gateway often wraps numbers as {"value": ..., "state": ...}.
+    if isinstance(v, dict):
+        for key in ("value", "Value", "lastValue", "amount"):
+            if key in v:
+                return v[key]
+    return v
+
 def norm_num(v):
     try:
+        v = scalar(v)
         if v is None or v == "": return None
         return float(str(v).replace(",", ""))
     except (ValueError, TypeError):
         return None
 
 def normalize(row):
-    sym = pick(row, "symbol", "lval18aFC", "lval18a", "ticker", "shortName", "Symbol")
+    sym = pick(row, "symbol", "lval18aFC", "lval18a", "ticker", "shortName", "Symbol", "instrumentName", "instrument_Name", "instrumentname")
+    if isinstance(sym, dict): sym = scalar(sym)
     if not sym: return None
-    last = norm_num(pick(row, "last_price", "lastPrice", "pDrCotVal", "pl", "last"))
-    close = norm_num(pick(row, "adj_closing_price", "closingPrice", "pClosing", "pc", "close"))
-    prev = norm_num(pick(row, "yesterday_price", "yesterdayPrice", "priceYesterday", "py"))
-    vol = norm_num(pick(row, "volume_of_trans", "volume", "qTotTran5J", "vol"))
-    value = norm_num(pick(row, "value_of_trans", "value", "qTotCap", "tradeValue"))
+    last = norm_num(pick(row, "last_price", "lastPrice", "lastprice", "pDrCotVal", "pl", "last"))
+    close = norm_num(pick(row, "adj_closing_price", "closingPrice", "closingprice", "pClosing", "pc", "close"))
+    prev = norm_num(pick(row, "yesterday_price", "yesterdayPrice", "yesterdayprice", "priceYesterday", "py"))
+    vol = norm_num(pick(row, "volume_of_trans", "volume", "tradeVolume", "tradevolume", "qTotTran5J", "vol"))
+    value = norm_num(pick(row, "value_of_trans", "value", "tradeValue", "tradevalue", "qTotCap"))
     eps = norm_num(pick(row, "EPS", "eps", "estimatedEPS"))
     pe = norm_num(pick(row, "P/E", "pe", "pE", "priceEarningRatio"))
     change = ((last / prev) - 1) * 100 if last and prev else None
@@ -71,7 +81,7 @@ def normalize(row):
     corp_buy = norm_num(pick(row, "corporate_buy_vol", "corporateBuyVolume", "vol_corporate_buy", "BuyVolumeCorporate"))
     corp_sell = norm_num(pick(row, "corporate_sell_vol", "corporateSellVolume", "vol_corporate_sell", "SellVolumeCorporate"))
     return {
-        "symbol": str(sym).strip(), "name": pick(row, "name", "lval30", "companyName", default=""),
+        "symbol": str(sym).strip(), "name": scalar(pick(row, "name", "lval30", "companyName", "companyNamePersian", default="")),
         "last": last, "close": close, "change_pct": change, "volume": vol, "value": value,
         "eps": eps, "pe": pe,
         "individual_net_volume": (ind_buy - ind_sell) if ind_buy is not None and ind_sell is not None else None,
