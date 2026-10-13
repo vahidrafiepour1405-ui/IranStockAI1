@@ -11,6 +11,9 @@ MARKETWATCH_URLS = [
     os.getenv("TSETMC_MARKETWATCH_URL", "https://webgw.tse.ir/InstrumentProvider/api/v1/MarketWatch/MarketWatchCash/fa"),
     "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch?market=0&paperTypes[0]=1&paperTypes[1]=2&paperTypes[2]=3&paperTypes[3]=4&paperTypes[4]=5&paperTypes[5]=6&paperTypes[6]=7&paperTypes[7]=8&paperTypes[8]=9&withBestLimits=false&hEven=0&RefID=0"
 ]
+# Legacy TSETMC endpoint is a fallback because the newer CDN market-watch
+# endpoint can return an empty list even when reachable.
+LEGACY_MARKETWATCH_URL = "https://old.tsetmc.com/tsev2/data/MarketWatchInit.aspx?h=0&r=0"
 FRESH_SECONDS = int(os.getenv("MAX_DATA_AGE_SECONDS", "180"))
 app = FastAPI(title=APP_NAME, version="0.1.0")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -92,6 +95,29 @@ def normalize(row):
         "signal_reason": "برای سیگنال معتبر، تاریخچه قیمت، جریان حقیقی/حقوقی و صورت‌های مالی معتبر باید هم‌زمان تأیید شوند."
     }
 
+def parse_legacy_marketwatch(raw: str) -> list[dict]:
+    """Parse the legacy TSETMC MarketWatchInit.aspx @/semicolon format."""
+    parts = raw.split("@")
+    if len(parts) < 3:
+        return []
+    rows = []
+    for line in parts[2].split(";"):
+        cols = line.strip().split(",")
+        # documented columns: insCode, isin, l18, l30, hEven, pf, pc, pl,
+        # tno, tvol, tval, pmin, pmax, py, eps, ...
+        if len(cols) < 15:
+            continue
+        row = {
+            "symbol": cols[2], "name": cols[3],
+            "pClosing": cols[6], "pDrCotVal": cols[7],
+            "qTotTran5J": cols[9], "qTotCap": cols[10],
+            "priceYesterday": cols[13], "eps": cols[14],
+        }
+        item = normalize(row)
+        if item:
+            rows.append(item)
+    return rows
+
 async def get_market_data():
     now = time.time()
     if _cache["data"] and now - _cache["at"] < 20:
@@ -99,15 +125,18 @@ async def get_market_data():
     errors = []
     timeout = httpx.Timeout(8.0, connect=4.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36","Accept":"application/json"}) as client:
-        for url in MARKETWATCH_URLS:
+        for url in [*MARKETWATCH_URLS, LEGACY_MARKETWATCH_URL]:
             try:
                 response = await client.get(url)
                 response.raise_for_status()
-                payload = response.json()
-                rows = find_rows(payload)
-                normalized = [x for x in (normalize(r) for r in rows if isinstance(r, dict)) if x]
+                if url == LEGACY_MARKETWATCH_URL:
+                    normalized = parse_legacy_marketwatch(response.text)
+                else:
+                    payload = response.json()
+                    rows = find_rows(payload)
+                    normalized = [x for x in (normalize(r) for r in rows if isinstance(r, dict)) if x]
                 if not normalized:
-                    errors.append(f"{url}: پاسخ دریافت شد اما ساختار داده قابل تشخیص نبود")
+                    errors.append(f"{url}: پاسخ دریافت شد اما نمادی در ساختار پاسخ پیدا نشد")
                     continue
                 result = {"items": normalized, "received_at": datetime.now(timezone.utc).isoformat(), "count": len(normalized)}
                 _cache.update({"at": now, "data": result, "source": url, "error": None})
